@@ -157,7 +157,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.open_obb_action)
         
         self.open_workspace_action = QAction("Open &Workspace", self)
-        self.open_workspace_action.triggered.connect(self._open_workspace_stub)
+        self.open_workspace_action.triggered.connect(self.open_workspace)
         file_menu.addAction(self.open_workspace_action)
         
         file_menu.addSeparator()
@@ -672,6 +672,21 @@ class MainWindow(QMainWindow):
             widget = self.tab_widget.widget(i)
             if hasattr(widget, 'set_developer_mode'):
                 widget.set_developer_mode(checked)
+    
+    @Slot()
+    def open_workspace(self):
+        """Open existing workspace."""
+        
+        dir_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Workspace Directory",
+            ""
+        )
+        
+        if dir_path:
+            self.workspace_path = dir_path
+            self.workspace_info_label.setText(f"Workspace: {os.path.basename(dir_path)}")
+            self.set_status(f"Opened workspace: {os.path.basename(dir_path)}")
     
     @Slot()
     def open_iff(self):
