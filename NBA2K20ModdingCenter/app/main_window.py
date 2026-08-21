@@ -461,7 +461,7 @@ class MainWindow(QMainWindow):
         
         self.progress_dialog.accept()
         
-        self.current_obb_path = reader.obb_path if hasattr(reader, 'obb_path') else reader.file_path if hasattr(reader, 'file_path') else None
+        self.current_obb_path = str(reader.obb_path) if hasattr(reader, "obb_path") else None
         self.obb_data = reader
         
         # Update UI
@@ -474,7 +474,8 @@ class MainWindow(QMainWindow):
         # Generate report
         self.generate_report()
         
-        self.set_status(f"Successfully opened: {os.path.basename(obb_path)}")
+        obb_name = os.path.basename(str(reader.obb_path)) if hasattr(reader, "obb_path") else "unknown.obb"
+        self.set_status(f"Successfully opened: {obb_name}")
         
         # Switch to dashboard
         self.tab_widget.setCurrentIndex(0)
