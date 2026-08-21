@@ -101,7 +101,7 @@ class DashboardWidget(QWidget):
                 background-color: #DC2626;
             }
         """)
-        open_button.clicked.connect(self.main_window.open_obb)
+        open_button.clicked.connect(self._open_obb_clicked)
         welcome_layout.addWidget(open_button, alignment=Qt.AlignCenter)
         
         content_layout.addWidget(self.welcome_frame)
@@ -156,15 +156,15 @@ class DashboardWidget(QWidget):
         actions_layout.setSpacing(10)
         
         self.extract_btn = QPushButton("Extract All")
-        self.extract_btn.clicked.connect(self.main_window.extract_all)
+        self.extract_btn.clicked.connect(self._extract_all_clicked)
         actions_layout.addWidget(self.extract_btn)
         
         self.analyze_btn = QPushButton("Analyze")
-        self.analyze_btn.clicked.connect(self.main_window.analyze_obb)
+        self.analyze_btn.clicked.connect(self._analyze_obb_clicked)
         actions_layout.addWidget(self.analyze_btn)
         
         self.rebuild_btn = QPushButton("Rebuild OBB")
-        self.rebuild_btn.clicked.connect(self.main_window.rebuild_obb)
+        self.rebuild_btn.clicked.connect(self._rebuild_obb_clicked)
         actions_layout.addWidget(self.rebuild_btn)
         
         dashboard_layout.addLayout(actions_layout)
@@ -176,6 +176,26 @@ class DashboardWidget(QWidget):
         self.dashboard_frame.hide()
         
         layout.addWidget(scroll)
+    
+    def _open_obb_clicked(self):
+        """Handle open OBB button click."""
+        if hasattr(self.main_window, 'open_obb'):
+            self.main_window.open_obb()
+    
+    def _extract_all_clicked(self):
+        """Handle extract all button click."""
+        if hasattr(self.main_window, 'extract_all'):
+            self.main_window.extract_all()
+    
+    def _analyze_obb_clicked(self):
+        """Handle analyze OBB button click."""
+        if hasattr(self.main_window, 'analyze_obb'):
+            self.main_window.analyze_obb()
+    
+    def _rebuild_obb_clicked(self):
+        """Handle rebuild OBB button click."""
+        if hasattr(self.main_window, 'rebuild_obb'):
+            self.main_window.rebuild_obb()
     
     def load_obb_data(self, obb_data):
         """Load OBB data into dashboard."""

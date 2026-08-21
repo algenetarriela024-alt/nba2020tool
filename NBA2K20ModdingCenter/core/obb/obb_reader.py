@@ -38,6 +38,7 @@ class OBBReader:
     def scan(self):
         """Perform initial scan of OBB file structure."""
         
+        # Ensure file is open
         if not self._file:
             self._file = open(self.file_path, 'rb')
         
@@ -60,8 +61,9 @@ class OBBReader:
     def _scan_for_signatures(self):
         """Scan for known file signatures in the OBB."""
         
+        # Ensure file is open
         if not self._file:
-            return
+            self._file = open(self.file_path, 'rb')
         
         # IFF signature: "IFF." or similar
         iff_signatures = [b'IFF.', b'IFF ', b'\x49\x46\x46\x00']
