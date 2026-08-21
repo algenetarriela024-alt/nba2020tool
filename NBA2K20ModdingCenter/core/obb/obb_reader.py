@@ -38,98 +38,121 @@ class OBBReader:
     def scan(self):
         """Perform initial scan of OBB file structure."""
         
-        # Ensure file is open
+        # Open file for reading if not already open
+        file_handle = None
         if not self._file:
-            self._file = open(self.file_path, 'rb')
+            file_handle = open(self.file_path, 'rb')
+            self._file = file_handle
         
-        # OBB files are typically simple archive formats
-        # We'll scan for known signatures
-        
-        self._file.seek(0)
-        
-        # Read first bytes to detect format
-        magic = self._file.read(16)
-        
-        # Check for common archive signatures
-        # Android OBB files are often just concatenated files or use a simple format
-        
-        self._file.seek(0)
-        
-        # For now, treat as a raw container and scan for IFF signatures
-        self._scan_for_signatures()
+        try:
+            # OBB files are typically simple archive formats
+            # We'll scan for known signatures
+            
+            self._file.seek(0)
+            
+            # Read first bytes to detect format
+            magic = self._file.read(16)
+            
+            # Check for common archive signatures
+            # Android OBB files are often just concatenated files or use a simple format
+            
+            self._file.seek(0)
+            
+            # For now, treat as a raw container and scan for IFF signatures
+            self._scan_for_signatures()
+        finally:
+            # Close the file handle we opened (if any)
+            if file_handle:
+                file_handle.close()
+                self._file = None
     
     def _scan_for_signatures(self):
         """Scan for known file signatures in the OBB."""
         
-        # Ensure file is open
+        # Open file if needed
+        file_handle = None
         if not self._file:
-            self._file = open(self.file_path, 'rb')
+            file_handle = open(self.file_path, 'rb')
+            self._file = file_handle
         
-        # IFF signature: "IFF." or similar
-        iff_signatures = [b'IFF.', b'IFF ', b'\x49\x46\x46\x00']
-        
-        # Scan through file looking for signatures
-        chunk_size = 1024 * 1024  # 1MB chunks
-        self._file.seek(0)
-        
-        position = 0
-        while position < self.file_size:
-            self._file.seek(position)
-            chunk = self._file.read(min(chunk_size, self.file_size - position))
+        try:
+            # IFF signature: "IFF." or similar
+            iff_signatures = [b'IFF.', b'IFF ', b'\x49\x46\x46\x00']
             
-            # Search for IFF signatures
-            for sig in iff_signatures:
-                offset = chunk.find(sig)
-                while offset != -1:
-                    absolute_offset = position + offset
-                    self._process_iff_candidate(absolute_offset)
-                    offset = chunk.find(sig, offset + 1)
+            # Scan through file looking for signatures
+            chunk_size = 1024 * 1024  # 1MB chunks
+            self._file.seek(0)
             
-            position += chunk_size - len(sig)  # Overlap to catch boundaries
+            position = 0
+            while position < self.file_size:
+                self._file.seek(position)
+                chunk = self._file.read(min(chunk_size, self.file_size - position))
+                
+                # Search for IFF signatures
+                for sig in iff_signatures:
+                    offset = chunk.find(sig)
+                    while offset != -1:
+                        absolute_offset = position + offset
+                        self._process_iff_candidate(absolute_offset)
+                        offset = chunk.find(sig, offset + 1)
+                
+                position += chunk_size - len(sig)  # Overlap to catch boundaries
+        finally:
+            if file_handle:
+                file_handle.close()
+                self._file = None
     
     def _process_iff_candidate(self, offset: int):
         """Process a potential IFF file at given offset."""
         
+        # Open file if needed
+        file_handle = None
         if not self._file:
-            return
-        
-        self._file.seek(offset)
-        
-        # Read potential IFF header
-        header = self._file.read(12)
-        if len(header) < 12:
-            return
-        
-        # Try to parse IFF structure
-        # Standard IFF format: 4CC ID + size + data
+            file_handle = open(self.file_path, 'rb')
+            self._file = file_handle
         
         try:
-            # Read IFF chunk header
-            iff_id = header[:4]
-            chunk_size = struct.unpack('>I', header[4:8])[0]
+            self._file.seek(offset)
             
-            # Validate size
-            if chunk_size > 100 * 1024 * 1024:  # > 100MB is suspicious
+            # Read potential IFF header
+            header = self._file.read(12)
+            if len(header) < 12:
                 return
             
-            # Extract filename from nearby data if possible
-            filename = f"IFF_{offset:08X}.iff"
+            # Try to parse IFF structure
+            # Standard IFF format: 4CC ID + size + data
             
-            file_info = {
-                'name': filename,
-                'type': 'IFF',
-                'offset': offset,
-                'size': chunk_size + 8,
-                'compression': '-',
-                'status': 'OK',
-                'iff_id': iff_id.decode('ascii', errors='replace'),
-            }
-            
-            self.files.append(file_info)
-            self.iff_files.append(file_info)
-            
-        except Exception:
-            pass
+            try:
+                # Read IFF chunk header
+                iff_id = header[:4]
+                chunk_size = struct.unpack('>I', header[4:8])[0]
+                
+                # Validate size
+                if chunk_size > 100 * 1024 * 1024:  # > 100MB is suspicious
+                    return
+                
+                # Extract filename from nearby data if possible
+                filename = f"IFF_{offset:08X}.iff"
+                
+                file_info = {
+                    'name': filename,
+                    'type': 'IFF',
+                    'offset': offset,
+                    'size': chunk_size + 8,
+                    'compression': '-',
+                    'status': 'OK',
+                    'iff_id': iff_id.decode('ascii', errors='replace'),
+                }
+                
+                self.files.append(file_info)
+                self.iff_files.append(file_info)
+                
+            except Exception:
+                pass
+        finally:
+            if file_handle:
+                file_handle.close()
+                self._file = None
     
     def detect_iff_files(self):
         """Detect IFF files in the OBB."""
@@ -140,25 +163,33 @@ class OBBReader:
     def detect_resources(self):
         """Detect resource blocks in the OBB."""
         
-        # Scan for BIN/resource signatures
+        # Open file if needed
+        file_handle = None
         if not self._file:
-            self._file = open(self.file_path, 'rb')
+            file_handle = open(self.file_path, 'rb')
+            self._file = file_handle
         
-        # Look for common resource patterns
-        resource_signatures = [
-            b'\x00\x00\x00\x00',  # Null padding (potential resource boundary)
-        ]
-        
-        # For now, mark large contiguous regions as potential resources
-        for file_info in self.files:
-            if file_info['type'] != 'IFF':
-                self.resources.append({
-                    'name': file_info['name'],
-                    'type': 'BIN',
-                    'offset': file_info['offset'],
-                    'size': file_info['size'],
-                    'parent': file_info.get('name'),
-                })
+        try:
+            # Scan for BIN/resource signatures
+            # Look for common resource patterns
+            resource_signatures = [
+                b'\x00\x00\x00\x00',  # Null padding (potential resource boundary)
+            ]
+            
+            # For now, mark large contiguous regions as potential resources
+            for file_info in self.files:
+                if file_info['type'] != 'IFF':
+                    self.resources.append({
+                        'name': file_info['name'],
+                        'type': 'BIN',
+                        'offset': file_info['offset'],
+                        'size': file_info['size'],
+                        'parent': file_info.get('name'),
+                    })
+        finally:
+            if file_handle:
+                file_handle.close()
+                self._file = None
     
     def scan_textures(self):
         """Scan for texture data in resources."""
@@ -186,22 +217,30 @@ class OBBReader:
     def extract_files(self, files: List[Dict], output_dir: str):
         """Extract specified files to output directory."""
         
+        # Open file if needed
+        file_handle = None
         if not self._file:
-            self._file = open(self.file_path, 'rb')
+            file_handle = open(self.file_path, 'rb')
+            self._file = file_handle
         
-        os.makedirs(output_dir, exist_ok=True)
-        
-        for file_info in files:
-            offset = file_info.get('offset', 0)
-            size = file_info.get('size', 0)
-            name = file_info.get('name', 'unknown')
+        try:
+            os.makedirs(output_dir, exist_ok=True)
             
-            self._file.seek(offset)
-            data = self._file.read(size)
-            
-            output_path = os.path.join(output_dir, name)
-            with open(output_path, 'wb') as f:
-                f.write(data)
+            for file_info in files:
+                offset = file_info.get('offset', 0)
+                size = file_info.get('size', 0)
+                name = file_info.get('name', 'unknown')
+                
+                self._file.seek(offset)
+                data = self._file.read(size)
+                
+                output_path = os.path.join(output_dir, name)
+                with open(output_path, 'wb') as f:
+                    f.write(data)
+        finally:
+            if file_handle:
+                file_handle.close()
+                self._file = None
     
     def extract_all(self, output_dir: str):
         """Extract all files to output directory."""
@@ -227,11 +266,19 @@ class OBBReader:
     def read_at(self, offset: int, size: int) -> bytes:
         """Read data at specific offset."""
         
+        # Open file if needed
+        file_handle = None
         if not self._file:
-            self._file = open(self.file_path, 'rb')
+            file_handle = open(self.file_path, 'rb')
+            self._file = file_handle
         
-        self._file.seek(offset)
-        return self._file.read(size)
+        try:
+            self._file.seek(offset)
+            return self._file.read(size)
+        finally:
+            if file_handle:
+                file_handle.close()
+                self._file = None
     
     def get_file_data(self, file_info: Dict) -> bytes:
         """Get complete data for a file."""

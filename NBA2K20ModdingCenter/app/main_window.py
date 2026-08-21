@@ -390,25 +390,27 @@ class MainWindow(QMainWindow):
         
         reader = OBBReader(file_path)
         
-        # Step 1: Basic scan
-        self.worker.progress.emit(10, "Scanning file structure...")
-        reader.scan()
-        
-        # Step 2: Detect IFF files
-        self.worker.progress.emit(30, "Detecting IFF files...")
-        reader.detect_iff_files()
-        
-        # Step 3: Detect resource blocks
-        self.worker.progress.emit(50, "Detecting resource blocks...")
-        reader.detect_resources()
-        
-        # Step 4: Scan textures
-        self.worker.progress.emit(70, "Scanning textures...")
-        reader.scan_textures()
-        
-        # Step 5: Build asset index
-        self.worker.progress.emit(90, "Building asset index...")
-        reader.build_index()
+        # Use context manager to ensure file is properly opened and closed
+        with reader:
+            # Step 1: Basic scan
+            self.worker.progress.emit(10, "Scanning file structure...")
+            reader.scan()
+            
+            # Step 2: Detect IFF files (already done in scan, but kept for compatibility)
+            self.worker.progress.emit(30, "Detecting IFF files...")
+            reader.detect_iff_files()
+            
+            # Step 3: Detect resource blocks
+            self.worker.progress.emit(50, "Detecting resource blocks...")
+            reader.detect_resources()
+            
+            # Step 4: Scan textures
+            self.worker.progress.emit(70, "Scanning textures...")
+            reader.scan_textures()
+            
+            # Step 5: Build asset index
+            self.worker.progress.emit(90, "Building asset index...")
+            reader.build_index()
         
         self.worker.progress.emit(100, "Analysis complete")
         
