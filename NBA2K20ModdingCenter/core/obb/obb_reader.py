@@ -1,375 +1,333 @@
 """
 NBA 2K20 OBB Container Parser
 
+Precise parser for the NBA 2K20 Android proprietary container format.
 Implements:
-- OBB entry table parsing (0x1000-byte aligned)
-- Entry hash-indexed lookup
-- Compressed/decompressed data handling
-- ZLIB decompression
-- SHA-256/CRC32 verification
+- Magic value verification (0xBFxB3x00xAA)
+- 2KB block alignment
+- Hash-indexed entry table parsing
+- ZLIB multi-block decompression
+- Type detection (compressed, zlib-image, cdf, dram, filelist, ogg)
 """
+
+from __future__ import annotations
 
 import struct
 import zlib
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, BinaryIO, Tuple
-from enum import IntEnum
+from typing import BinaryIO, Iterator, Optional, Dict, List
 
 
-class EntryType(IntEnum):
-    """NBA 2K20 OBB entry types"""
-    UNKNOWN = 0
-    IFF = 1
-    BIN = 2
-    DAT = 3
-    ZLIB = 4
-    CDF = 5
-    DRAM = 6
-    OGG = 7
-    FILELIST = 8
+# Format constants
+MAGIC = b"\xbf\xb3\x00\xaa"
+ALIGNMENT = 2048
+TABLE_OFFSET = 0xF8
+RECORD_STRUCT = struct.Struct("<IIII")
+
+# Entry type signatures
+TYPE_COMPRESSED = b"\x94\xef\x3b\xff"
+TYPE_ZLIB = b"ZLIB"
+TYPE_CDF = b"\x30\x50\x98\xf0"
+TYPE_DRAM = b"\xdf\x85\xc5\xce"
+TYPE_FILELIST = b"\x07\x12\x79\xe4"
+
+TYPE_NAMES = {
+    TYPE_COMPRESSED: "compressed",
+    TYPE_ZLIB: "zlib-image",
+    TYPE_CDF: "cdf",
+    TYPE_DRAM: "dram",
+    TYPE_FILELIST: "filelist",
+    b"OggS": "ogg",
+}
+
+# Known filename mappings
+KNOWN_NAMES = {
+    zlib.crc32(b"TITLEPAGE.IFF"): "TITLEPAGE.IFF",
+    zlib.crc32(b"LOADINGFLOWSTATIC.IFF"): "LOADINGFLOWSTATIC.IFF",
+    zlib.crc32(b"ENGLISHBOOTUP.IFF"): "ENGLISHBOOTUP.IFF",
+    zlib.crc32(b"FRONTEND_SYNC.IFF"): "FRONTEND_SYNC.IFF",
+    zlib.crc32(b"GOOEYFRONTEND.IFF"): "GOOEYFRONTEND.IFF",
+    zlib.crc32(b"GLOBAL.IFF"): "GLOBAL.IFF",
+    zlib.crc32(b"LOGOS_LARGE.CDF"): "LOGOS_LARGE.CDF",
+    zlib.crc32(b"LOGOS_MEDIUM.CDF"): "LOGOS_MEDIUM.CDF",
+    zlib.crc32(b"LOGOS_SMALL.CDF"): "LOGOS_SMALL.CDF",
+    zlib.crc32(b"LOGOS_TINY.CDF"): "LOGOS_TINY.CDF",
+}
+
+# Add generated names
+for i in range(32):
+    KNOWN_NAMES[zlib.crc32(f"F{i:03d}.IFF".encode())] = f"F{i:03d}.IFF"
+    KNOWN_NAMES[zlib.crc32(f"LOGO{i:03d}.IFF".encode())] = f"LOGO{i:03d}.IFF"
+    KNOWN_NAMES[zlib.crc32(f"UH{i:03d}.IFF".encode())] = f"UH{i:03d}.IFF"
+    KNOWN_NAMES[zlib.crc32(f"UA{i:03d}.IFF".encode())] = f"UA{i:03d}.IFF"
 
 
-@dataclass
+@dataclass(frozen=True)
 class ObbEntry:
-    """Represents a single entry in the OBB container"""
+    """Represents a single entry in the NBA 2K20 OBB container."""
     index: int
-    name_hash: int  # CRC32 hash of the entry name
-    offset: int  # Offset in the OBB container
-    compressed_size: int  # Size in OBB (may be compressed)
-    decompressed_size: int  # Size after decompression
-    entry_type: EntryType
-    flags: int
-    block_alignment: int = 0x1000  # 4KB alignment
-    
+    name_hash: int
+    block: int
+    length: int
+    reserved: int
+
     @property
-    def is_compressed(self) -> bool:
-        """Check if entry data is compressed"""
-        return (self.flags & 0x01) != 0
-    
+    def offset(self) -> int:
+        """Calculate byte offset from block number."""
+        return self.block * ALIGNMENT
+
     @property
-    def has_zlib_wrapper(self) -> bool:
-        """Check if entry uses ZLIB compression"""
-        return (self.flags & 0x02) != 0
+    def name(self) -> str:
+        """Get known name or hex hash fallback."""
+        return KNOWN_NAMES.get(self.name_hash, f"{self.name_hash:08x}")
+
+    @property
+    def type_name(self) -> str:
+        """Placeholder - actual type determined during read."""
+        return "unknown"
 
 
 class ObbParser:
     """
     Parses NBA 2K20 OBB container format.
     
-    OBB Structure:
-    - Entry table (variable size, 0x1000-byte aligned)
-    - Entry data blocks (0x1000-byte aligned)
+    Structure:
+    - 0xF8 byte header with magic, alignment, counts
+    - Entry table (0xD0 bytes per entry)
+    - Data blocks (2KB aligned)
     """
     
     def __init__(self, obb_path: Path):
         self.obb_path = Path(obb_path)
-        self.entries: Dict[int, ObbEntry] = {}
+        self.entries: List[ObbEntry] = []
         self.entry_by_hash: Dict[int, ObbEntry] = {}
         self.file_size = 0
-        self.header_hash = None
-        self.archive_crc = None
+        self.header_hash: Optional[str] = None
+        self._next_offsets: Dict[int, int] = {}
         self._file_handle: Optional[BinaryIO] = None
     
     def open(self) -> bool:
-        """
-        Open and parse the OBB file.
-        Returns True on success.
-        """
+        """Open and parse the OBB file structure."""
         try:
             self.file_size = self.obb_path.stat().st_size
-            self._file_handle = open(self.obb_path, 'rb')
             
-            # Parse header and entry table
-            if not self._parse_header():
-                return False
+            with self.obb_path.open("rb") as stream:
+                # Verify magic
+                magic = stream.read(4)
+                if magic != MAGIC:
+                    print(f"Error: Invalid OBB magic. Expected {MAGIC.hex()}, got {magic.hex()}")
+                    return False
+                
+                # Verify alignment
+                align_val = self._read_u32le(stream, 4)
+                if align_val != ALIGNMENT:
+                    print(f"Error: Unexpected alignment {align_val}, expected {ALIGNMENT}")
+                    return False
+                
+                # Verify archive count
+                archive_count = self._read_u64le(stream, 8)
+                if archive_count != 1:
+                    print(f"Warning: Unexpected archive count {archive_count}")
+                
+                # Read entry count
+                count = self._read_u64le(stream, 0x18)
+                
+                # Parse entry table
+                stream.seek(TABLE_OFFSET)
+                self.entries.clear()
+                self.entry_by_hash.clear()
+                
+                for index in range(count):
+                    record_data = stream.read(RECORD_STRUCT.size)
+                    if len(record_data) < RECORD_STRUCT.size:
+                        print(f"Error: Truncated entry table at index {index}")
+                        break
+                    
+                    length, reserved, name_hash, block = RECORD_STRUCT.unpack(record_data)
+                    entry = ObbEntry(
+                        index=index,
+                        name_hash=name_hash,
+                        block=block,
+                        length=length,
+                        reserved=reserved
+                    )
+                    
+                    # Validate offset
+                    if entry.offset >= self.file_size:
+                        print(f"Warning: Entry {index} offset {entry.offset} beyond file size")
+                        continue
+                    
+                    self.entries.append(entry)
+                    self.entry_by_hash[name_hash] = entry
+                
+                # Build offset map for stored_size calculation
+                offsets = sorted({e.offset for e in self.entries})
+                self._next_offsets = {
+                    offset: offsets[i + 1] if i + 1 < len(offsets) else self.file_size
+                    for i, offset in enumerate(offsets)
+                }
             
-            # Calculate archive SHA-256
-            self._calculate_archive_hash()
+            return len(self.entries) > 0
             
-            return True
         except Exception as e:
             print(f"Error opening OBB: {e}")
             return False
     
     def close(self):
-        """Close the OBB file handle"""
+        """Close any open file handles."""
         if self._file_handle:
             self._file_handle.close()
             self._file_handle = None
     
-    def _parse_header(self) -> bool:
-        """Parse OBB header and entry table."""
-        if not self._file_handle:
-            return False
-
-        self._file_handle.seek(0)
-        header_data = self._file_handle.read(min(0x4000, self.file_size))
-
-        if len(header_data) < 16:
-            return False
-
-        self.entries.clear()
-        self.entry_by_hash.clear()
-
-        entry_count = self._detect_entry_table(header_data)
-        if entry_count == 0:
-            print("Warning: Could not detect entry table, attempting fallback parse")
-            return self._parse_fallback()
-
-        return len(self.entries) > 0
-
-    def _detect_entry_table(self, header_data: bytes) -> int:
-        """
-        Detect a plausible entry table used by NBA 2K20 OBB files.
-        """
-        max_count = self._guess_entry_count(header_data)
-        if max_count:
-            count = self._scan_entry_table(header_data, max_count=max_count)
-            if count:
-                return count
-
-        return self._scan_entry_table(header_data, max_count=512)
-
-    def _guess_entry_count(self, header_data: bytes) -> int:
-        """Look for plausible entry-count metadata in the file header."""
-        for offset in range(0, min(len(header_data), 0x200), 4):
-            try:
-                count = struct.unpack_from('<I', header_data, offset)[0]
-            except Exception:
-                continue
-            if 1 <= count <= 200000 and count * 16 < self.file_size:
-                return count
-        return 0
-
-    def _scan_entry_table(self, header_data: bytes, max_count: int = 512) -> int:
-        """Scan a region for valid entry records and create ObbEntry objects."""
-        matches = 0
-
-        search_starts = [0, 0x20, 0x40, 0x80, 0x100, 0x200, 0x1000]
-        for start in search_starts:
-            if start >= len(header_data) - 24:
-                continue
-            for offset in range(start, min(len(header_data) - 24, 0x8000), 4):
-                if matches >= max_count:
-                    return matches
-                try:
-                    name_hash, data_offset, comp_size, decomp_size, flags, reserved = struct.unpack_from(
-                        '<IIIIHH', header_data, offset
-                    )
-                except Exception:
-                    continue
-
-                if not self._is_valid_entry(name_hash, data_offset, comp_size, decomp_size):
-                    continue
-
-                if flags > 0x7FFF or reserved > 0xFFFF:
-                    continue
-
-                entry = ObbEntry(
-                    index=matches,
-                    name_hash=name_hash,
-                    offset=data_offset,
-                    compressed_size=comp_size,
-                    decompressed_size=decomp_size,
-                    entry_type=EntryType.IFF if decomp_size > 0 else EntryType.BIN,
-                    flags=flags,
-                    block_alignment=0x1000
-                )
-                self.entries[matches] = entry
-                self.entry_by_hash[name_hash] = entry
-                matches += 1
-
-                if matches >= 1 and offset > 0x1000 and offset % 0x1000 == 0:
-                    break
-
-        return matches
+    def stored_size(self, entry: ObbEntry) -> int:
+        """Return physical span including padding to next entry."""
+        return self._next_offsets.get(entry.offset, self.file_size) - entry.offset
     
-    def _is_valid_entry(self, name_hash: int, offset: int, comp_size: int, decomp_size: int) -> bool:
-        """Validate entry parameters with more tolerant NBA 2K20 heuristics."""
-        if name_hash == 0:
-            return False
-        if offset < 0x1000 or offset > self.file_size:
-            return False
-        if comp_size <= 0 or comp_size > self.file_size:
-            return False
-        if decomp_size < 0 or decomp_size > self.file_size * 32:
-            return False
-
-        if decomp_size >= comp_size:
-            return True
-
-        if decomp_size > 0 and comp_size > 0 and decomp_size < comp_size * 16:
-            return True
-
-        return False
+    def get_entry_type(self, stream: BinaryIO, entry: ObbEntry) -> bytes:
+        """Read 4-byte type signature from entry start."""
+        stream.seek(entry.offset)
+        return stream.read(4)
     
-    def _parse_fallback(self) -> bool:
-        """Fallback parse method - scan entire file for IFF signatures"""
-        print("Using fallback signature scanning...")
+    def get_type_name(self, stream: BinaryIO, entry: ObbEntry) -> str:
+        """Get human-readable type name."""
+        sig = self.get_entry_type(stream, entry)
+        return TYPE_NAMES.get(sig, sig.hex() if sig else "empty")
+    
+    def decompressed_chunks(self, stream: BinaryIO, entry: ObbEntry) -> Iterator[bytes]:
+        """
+        Decompress ZLIB-wrapped entry data.
+        Yields uncompressed chunks.
+        """
+        stream.seek(entry.offset)
+        entry_type = stream.read(4)
         
-        # Scan entire file for IFF signatures
-        self._file_handle.seek(0)
-        chunk_size = 1024 * 1024  # 1MB chunks
+        if entry_type == TYPE_COMPRESSED:
+            # Skip relative offset field
+            rel_offset = struct.unpack("<I", stream.read(4))[0]
+            if rel_offset < 8 or rel_offset >= self.stored_size(entry):
+                raise ValueError(f"Invalid payload offset {rel_offset} for entry {entry.index}")
+            position = entry.offset + rel_offset
+        elif entry_type == TYPE_ZLIB:
+            position = entry.offset
+        else:
+            raise ValueError(f"Entry {entry.index} is not ZLIB-wrapped (type: {entry_type.hex()})")
         
-        while True:
-            header_data = self._file_handle.read(chunk_size)
-            if not header_data:
+        end = entry.offset + self.stored_size(entry)
+        block_num = 0
+        
+        while position + 16 <= end:
+            stream.seek(position)
+            if stream.read(4) != TYPE_ZLIB:
                 break
             
-            pos = 0
-            while True:
-                idx = header_data.find(b'IFF.', pos)
-                if idx == -1:
-                    break
-                
-                offset = self._file_handle.tell() - len(header_data) + idx
-                
-                # Check if we already have this offset
-                if not any(e.offset == offset for e in self.entries.values()):
-                    # Try to estimate size by reading ahead
-                    self._file_handle.seek(offset + 4)
-                    size_bytes = self._file_handle.read(4)
-                    estimated_size = 0
-                    if len(size_bytes) == 4:
-                        estimated_size = struct.unpack('<I', size_bytes)[0]
-                    
-                    entry = ObbEntry(
-                        index=len(self.entries),
-                        name_hash=zlib.crc32(f"iff_{offset}".encode()) & 0xFFFFFFFF,
-                        offset=offset,
-                        compressed_size=estimated_size if estimated_size > 0 else 1024,
-                        decompressed_size=estimated_size if estimated_size > 0 else 1024,
-                        entry_type=EntryType.IFF,
-                        flags=0,
-                        block_alignment=0x1000
-                    )
-                    self.entries[entry.index] = entry
-                    self.entry_by_hash[entry.name_hash] = entry
-                
-                pos = idx + 4
+            # Read ZLIB block header (big-endian)
+            header = stream.read(12)
+            if len(header) < 12:
+                break
+            
+            unpacked_size, stored_size, flags = struct.unpack(">III", header)
+            packed_size = stored_size - 16
+            
+            if packed_size <= 0 or position + stored_size > end:
+                raise ValueError(f"Invalid ZLIB block {block_num} in entry {entry.index}")
+            
+            # Read and decompress
+            packed_data = stream.read(packed_size)
+            if len(packed_data) != packed_size:
+                raise EOFError(f"Truncated ZLIB block {block_num}")
+            
+            unpacked_data = zlib.decompress(packed_data)
+            if len(unpacked_data) != unpacked_size:
+                raise ValueError(f"Decompressed size mismatch in block {block_num}")
+            
+            yield unpacked_data
+            position += stored_size
+            block_num += 1
         
-        print(f"Fallback found {len(self.entries)} entries")
-        return len(self.entries) > 0
+        if block_num == 0:
+            raise ValueError(f"No valid ZLIB blocks found in entry {entry.index}")
     
-    def _calculate_archive_hash(self):
-        """Calculate SHA-256 hash of entire archive"""
-        if not self._file_handle:
-            return
+    def extract_entry(self, entry: ObbEntry, decompress: bool = False) -> Optional[bytes]:
+        """
+        Extract entry data.
         
+        Args:
+            entry: The entry to extract
+            decompress: If True, decompress ZLIB data; if False, return raw bytes
+        
+        Returns:
+            Extracted data or None on error
+        """
         try:
-            self._file_handle.seek(0)
-            sha256 = hashlib.sha256()
-            while True:
-                chunk = self._file_handle.read(65536)
-                if not chunk:
-                    break
-                sha256.update(chunk)
-            self.header_hash = sha256.hexdigest()
+            with self.obb_path.open("rb") as stream:
+                if decompress:
+                    chunks = list(self.decompressed_chunks(stream, entry))
+                    return b"".join(chunks)
+                else:
+                    stream.seek(entry.offset)
+                    size = self.stored_size(entry)
+                    return stream.read(size)
         except Exception as e:
-            print(f"Error calculating archive hash: {e}")
-    
-    def extract_entry(self, entry_index: int) -> Optional[bytes]:
-        """Extract and decompress entry data."""
-        if entry_index not in self.entries:
-            return None
-        
-        entry = self.entries[entry_index]
-        return self._read_entry_data(entry)
-    
-    def extract_entry_by_hash(self, name_hash: int) -> Optional[bytes]:
-        """Extract entry by name hash"""
-        if name_hash not in self.entry_by_hash:
-            return None
-        
-        entry = self.entry_by_hash[name_hash]
-        return self._read_entry_data(entry)
-    
-    def _read_entry_data(self, entry: ObbEntry) -> Optional[bytes]:
-        """Read and decompress entry data."""
-        if not self._file_handle:
-            return None
-
-        try:
-            self._file_handle.seek(entry.offset)
-            compressed_data = self._file_handle.read(entry.compressed_size)
-
-            if len(compressed_data) != entry.compressed_size:
-                print(f"Warning: Read {len(compressed_data)} bytes, expected {entry.compressed_size}")
-
-            if not entry.is_compressed:
-                return compressed_data
-
-            if len(compressed_data) == entry.decompressed_size and entry.decompressed_size > 0:
-                return compressed_data
-
-            zlib_header = compressed_data[:2]
-            looks_like_zlib = zlib_header in {b'\x78\x01', b'\x78\x5e', b'\x78\x9c', b'\x78\xda'}
-
-            def _try_decompress() -> Optional[bytes]:
-                attempts = []
-                if entry.has_zlib_wrapper or looks_like_zlib:
-                    attempts.append(('zlib', lambda: zlib.decompress(compressed_data)))
-                attempts.append(('raw', lambda: zlib.decompress(compressed_data, -zlib.MAX_WBITS)))
-
-                for label, fn in attempts:
-                    try:
-                        out = fn()
-                        if entry.decompressed_size > 0 and len(out) != entry.decompressed_size:
-                            return out
-                        return out
-                    except zlib.error:
-                        continue
-                return None
-
-            if not looks_like_zlib and compressed_data and not compressed_data.startswith(b'IFF'):
-                return compressed_data
-
-            decompressed = _try_decompress()
-            if decompressed is not None:
-                return decompressed
-
-            if entry.decompressed_size > 0 and compressed_data and len(compressed_data) <= entry.decompressed_size * 2:
-                return compressed_data
-
-            return compressed_data
-
-        except Exception as e:
+            print(f"Error extracting entry {entry.index}: {e}")
             return None
     
     def get_entry_list(self) -> List[ObbEntry]:
-        """Get list of all entries"""
-        return sorted(self.entries.values(), key=lambda e: e.index)
+        """Get all entries sorted by index."""
+        return sorted(self.entries, key=lambda e: e.index)
     
-    def get_entry_info(self, entry_index: int) -> Optional[ObbEntry]:
-        """Get entry metadata"""
-        return self.entries.get(entry_index)
+    def get_entry_info(self, index: int) -> Optional[ObbEntry]:
+        """Get entry by index."""
+        if 0 <= index < len(self.entries):
+            return self.entries[index]
+        return None
     
     def list_entries(self) -> List[Dict]:
-        """Get human-readable entry list"""
-        return [
-            {
-                'index': e.index,
-                'hash': f'0x{e.name_hash:08x}',
-                'offset': f'0x{e.offset:08x}',
-                'compressed': e.compressed_size,
-                'decompressed': e.decompressed_size,
-                'ratio': f'{(e.compressed_size / max(e.decompressed_size, 1) * 100):.1f}%' if e.decompressed_size > 0 else 'N/A',
-                'type': e.entry_type.name,
-                'flags': f'0x{e.flags:04x}'
-            }
-            for e in self.get_entry_list()
-        ]
+        """Get human-readable entry information."""
+        result = []
+        with self.obb_path.open("rb") as stream:
+            for entry in self.entries:
+                type_name = self.get_type_name(stream, entry)
+                result.append({
+                    'index': entry.index,
+                    'name': entry.name,
+                    'hash': f"0x{entry.name_hash:08x}",
+                    'block': entry.block,
+                    'offset': f"0x{entry.offset:08x}",
+                    'length': entry.length,
+                    'stored_size': self.stored_size(entry),
+                    'type': type_name,
+                })
+        return result
     
     @property
     def entry_count(self) -> int:
-        """Get total number of entries"""
+        """Total number of entries."""
         return len(self.entries)
+    
+    def _read_u32le(self, stream: BinaryIO, offset: int) -> int:
+        """Read 32-bit little-endian integer."""
+        stream.seek(offset)
+        data = stream.read(4)
+        return struct.unpack("<I", data)[0]
+    
+    def _read_u64le(self, stream: BinaryIO, offset: int) -> int:
+        """Read 64-bit little-endian integer."""
+        stream.seek(offset)
+        data = stream.read(8)
+        return struct.unpack("<Q", data)[0]
 
 
 def load_obb(obb_path: Path) -> Optional[ObbParser]:
-    """Convenience function to load and parse an OBB file."""
+    """
+    Convenience function to load an OBB file.
+    
+    Usage:
+        parser = load_obb(Path("main.obb"))
+        if parser:
+            for entry in parser.entries:
+                print(entry.name)
+    """
     parser = ObbParser(obb_path)
     if parser.open():
         return parser
