@@ -474,7 +474,7 @@ class MainWindow(QMainWindow):
         # Generate report
         self.generate_report()
         
-        self.set_status(f"Successfully opened: {os.path.basename(reader.file_path)}")
+        self.set_status(f"Successfully opened: {os.path.basename(obb_path)}")
         
         # Switch to dashboard
         self.tab_widget.setCurrentIndex(0)
