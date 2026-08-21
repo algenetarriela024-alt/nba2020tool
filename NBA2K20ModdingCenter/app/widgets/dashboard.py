@@ -203,9 +203,16 @@ class DashboardWidget(QWidget):
         self.welcome_frame.hide()
         self.dashboard_frame.show()
         
-        # Update title
+        # Update title - handle both file_path and obb_path attributes
         import os
-        self.obb_title_label.setText(os.path.basename(obb_data.file_path))
+        file_path = getattr(obb_data, 'file_path', None)
+        if file_path is None:
+            file_path = getattr(obb_data, 'obb_path', None)
+        
+        if file_path:
+            self.obb_title_label.setText(os.path.basename(str(file_path)))
+        else:
+            self.obb_title_label.setText("Unknown OBB")
         
         # Update cards
         if hasattr(obb_data, 'file_size'):
