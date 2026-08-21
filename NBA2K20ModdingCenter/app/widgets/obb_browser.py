@@ -77,7 +77,32 @@ class OBBBrowserWidget(QWidget):
         self.obb_data = obb_data
         self.file_tree.clear()
         
-        if not hasattr(obb_data, 'files'):
+        # Get files list - try different attribute names for compatibility
+        files_list = getattr(obb_data, 'files', [])
+        
+        if not files_list and hasattr(obb_data, 'get_entry_list'):
+            # Convert ObbParser entries to file info format
+            from core.obb.obb_reader import EntryType
+            for entry in obb_data.get_entry_list():
+                if entry.entry_type == EntryType.IFF:
+                    file_type = "IFF"
+                elif entry.entry_type == EntryType.BIN:
+                    file_type = "BIN"
+                else:
+                    file_type = entry.entry_type.name
+                
+                files_list.append({
+                    'name': f"{file_type}_{entry.index:04d}",
+                    'type': file_type,
+                    'offset': entry.offset,
+                    'size': entry.decompressed_size if entry.decompressed_size > 0 else entry.compressed_size,
+                    'compression': 'ZLIB' if entry.is_compressed else 'None',
+                    'status': 'OK',
+                    'index': entry.index,
+                    'entry': entry
+                })
+        
+        if not files_list:
             return
         
         # Create root items for different categories
@@ -94,7 +119,7 @@ class OBBBrowserWidget(QWidget):
         self.file_tree.addTopLevelItem(other_root)
         
         # Add files to appropriate categories
-        for file_info in obb_data.files:
+        for file_info in files_list:
             name = file_info.get('name', 'Unknown')
             file_type = file_info.get('type', 'Unknown')
             offset = file_info.get('offset', 0)
@@ -123,7 +148,7 @@ class OBBBrowserWidget(QWidget):
                 other_root.addChild(item)
         
         # Update count
-        self.file_count_label.setText(f"Files: {len(obb_data.files)}")
+        self.file_count_label.setText(f"Files: {len(files_list)}")
     
     def format_size(self, size: int) -> str:
         """Format file size."""

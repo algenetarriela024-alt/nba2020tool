@@ -24,7 +24,6 @@ from app.widgets.textures_widget import TexturesWidget
 from app.widgets.models_widget import ModelsWidget
 from app.widgets.logs_widget import LogsWidget
 from app.widgets.search_widget import SearchWidget
-from core.obb.obb_reader import OBBReader
 from core.analysis.report_generator import ReportGenerator
 
 
@@ -388,33 +387,66 @@ class MainWindow(QMainWindow):
     def _load_obb_worker(self, file_path: str):
         """Worker function to load OBB in background."""
         
-        reader = OBBReader(file_path)
+        from core.obb.obb_reader import ObbParser, EntryType
         
-        # Use context manager to ensure file is properly opened and closed
-        with reader:
-            # Step 1: Basic scan
-            self.worker.progress.emit(10, "Scanning file structure...")
-            reader.scan()
+        parser = ObbParser(file_path)
+        
+        if not parser.open():
+            raise Exception("Failed to parse OBB file")
+        
+        # Step 1: Basic scan
+        self.worker.progress.emit(10, "Scanning file structure...")
+        
+        # Step 2: Detect IFF files
+        self.worker.progress.emit(30, "Detecting IFF files...")
+        
+        # Step 3: Detect resource blocks
+        self.worker.progress.emit(50, "Detecting resource blocks...")
+        
+        # Step 4: Scan textures
+        self.worker.progress.emit(70, "Scanning textures...")
+        
+        # Step 5: Build asset index - convert parser entries to expected format
+        self.worker.progress.emit(90, "Building asset index...")
+        
+        # Convert ObbParser entries to the format expected by UI
+        files_list = []
+        for entry in parser.get_entry_list():
+            # Determine file type
+            if entry.entry_type == EntryType.IFF:
+                file_type = "IFF"
+            elif entry.entry_type == EntryType.BIN:
+                file_type = "BIN"
+            else:
+                file_type = entry.entry_type.name
             
-            # Step 2: Detect IFF files (already done in scan, but kept for compatibility)
-            self.worker.progress.emit(30, "Detecting IFF files...")
-            reader.detect_iff_files()
+            # Try to extract actual data to check for IFF signature
+            try:
+                data = parser.extract_entry(entry.index)
+                if data and data[:4] == b'IFF.':
+                    file_type = "IFF"
+            except:
+                pass
             
-            # Step 3: Detect resource blocks
-            self.worker.progress.emit(50, "Detecting resource blocks...")
-            reader.detect_resources()
-            
-            # Step 4: Scan textures
-            self.worker.progress.emit(70, "Scanning textures...")
-            reader.scan_textures()
-            
-            # Step 5: Build asset index
-            self.worker.progress.emit(90, "Building asset index...")
-            reader.build_index()
+            file_info = {
+                'name': f"{file_type}_{entry.index:04d}",
+                'type': file_type,
+                'offset': entry.offset,
+                'size': entry.decompressed_size if entry.decompressed_size > 0 else entry.compressed_size,
+                'compression': 'ZLIB' if entry.is_compressed else 'None',
+                'status': 'OK',
+                'index': entry.index,
+                'entry': entry,
+                'parser': parser
+            }
+            files_list.append(file_info)
         
         self.worker.progress.emit(100, "Analysis complete")
         
-        return reader
+        # Attach files list and parser to the parser object
+        parser.files = files_list
+        
+        return parser
     
     @Slot(int, str)
     def on_load_progress(self, value: int, message: str):
@@ -424,12 +456,12 @@ class MainWindow(QMainWindow):
         self.progress_label.setText(message)
     
     @Slot(object)
-    def on_obb_loaded(self, reader: OBBReader):
+    def on_obb_loaded(self, reader):
         """Handle OBB loaded successfully."""
         
         self.progress_dialog.accept()
         
-        self.current_obb_path = reader.file_path
+        self.current_obb_path = reader.obb_path if hasattr(reader, 'obb_path') else reader.file_path if hasattr(reader, 'file_path') else None
         self.obb_data = reader
         
         # Update UI
@@ -504,7 +536,14 @@ class MainWindow(QMainWindow):
             
             self.obb_info_label.setText(f"OBB: {os.path.basename(self.current_obb_path)} ({size_str})")
             
-            file_count = len(self.obb_data.files) if hasattr(self.obb_data, 'files') else 0
+            # Try different attribute names for compatibility
+            file_count = 0
+            if hasattr(self.obb_data, 'files'):
+                file_count = len(self.obb_data.files)
+            elif hasattr(self.obb_data, 'entry_count'):
+                file_count = self.obb_data.entry_count
+            elif hasattr(self.obb_data, 'get_entry_list'):
+                file_count = len(list(self.obb_data.get_entry_list()))
             self.file_count_label.setText(f"Files: {file_count}")
             
             resource_count = len(self.obb_data.resources) if hasattr(self.obb_data, 'resources') else 0
